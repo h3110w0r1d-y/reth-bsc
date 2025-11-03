@@ -31,14 +31,17 @@ pub mod consensus;
 pub mod engine;
 pub mod engine_api;
 pub mod evm;
+pub mod miner;
 pub mod network;
 pub mod primitives;
 pub mod storage;
+pub mod vote_producer;
+pub mod vote_journal;
 
 /// Bsc addons configuring RPC types
 pub type BscNodeAddOns<N> = RpcAddOns<
     N,
-    EthereumEthApiBuilder,
+    EthereumEthApiBuilder,  // Use standard Ethereum API builder
     BscPayloadValidatorBuilder,
     BscEngineApiBuilder,
     BscEngineValidatorBuilder,

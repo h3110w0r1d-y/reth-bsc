@@ -24,10 +24,11 @@ use revm::{
 };
 
 mod assembler;
+mod builder;
 pub mod config;
 pub use config::BscEvmConfig;
 mod executor;
-mod pre_execution;
+pub mod pre_execution;
 mod post_execution;
 mod factory;
 mod patch;

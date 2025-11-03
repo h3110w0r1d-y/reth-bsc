@@ -3,24 +3,26 @@ use alloy_rlp::{Decodable, Encodable};
 use futures::{Stream, StreamExt};
 use std::{pin::Pin, task::{Context, Poll, ready}};
 use reth_eth_wire::multiplex::ProtocolConnection;
-use bytes::Bytes;
+use bytes::{Bytes, BufMut};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio::time::{Duration, Sleep};
 use futures::Future;
+use std::sync::Arc;
 
 /// Handshake timeout, mirroring the Go implementation.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 use crate::node::network::votes::{VotesPacket, BscCapPacket, handle_votes_broadcast};
+use crate::consensus::parlia::vote::VoteEnvelope;
 use super::protocol::proto::{BscProtoMessageId, BSC_PROTOCOL_VERSION};
 
 /// Commands that can be sent to the BSC connection.
 #[allow(dead_code)]
 #[derive(Debug)]
 pub enum BscCommand {
-    SendCapability { protocol_version: u64, extra: Bytes },
-    SendVotes(Vec<crate::consensus::parlia::vote::VoteEnvelope>),
+    Capability { protocol_version: u64, extra: Bytes },
+    Votes(Arc<Vec<crate::consensus::parlia::vote::VoteEnvelope>>),
 }
 
 /// Stream that handles incoming BSC protocol messages and returns outgoing messages to send.
@@ -38,7 +40,7 @@ impl BscProtocolConnection {
         let handshake_deadline = Some(Box::pin(tokio::time::sleep(HANDSHAKE_TIMEOUT)));
         // Both sides should send initial capability in BSC protocol
         // BSC sends []byte{00} which in RLP is encoded as a single byte 0x00
-        let initial_capability = Some(BscCommand::SendCapability { 
+        let initial_capability = Some(BscCommand::Capability { 
             protocol_version: BSC_PROTOCOL_VERSION, 
             extra: Bytes::from_static(&[0x00u8]) // Raw RLP: single 0x00 byte represents []byte{00}
         });
@@ -53,9 +55,17 @@ impl BscProtocolConnection {
         }
     }
 
+    fn encode_votes_slice(buf: &mut BytesMut, votes: &[VoteEnvelope]) {
+        // Message ID followed by an RLP list of VoteEnvelope
+        buf.put_u8(BscProtoMessageId::Votes as u8);
+        let payload_length: usize = votes.iter().map(|v| v.length()).sum();
+        alloy_rlp::Header { list: true, payload_length }.encode(buf);
+        for v in votes { v.encode(buf); }
+    }
+
     fn encode_command(cmd: BscCommand) -> BytesMut {
         match cmd {
-            BscCommand::SendCapability { protocol_version, extra } => {
+            BscCommand::Capability { protocol_version, extra } => {
                 let mut buf = BytesMut::new();
                 let cap_packet = BscCapPacket { protocol_version, extra };
                 cap_packet.encode(&mut buf);
@@ -71,10 +81,11 @@ impl BscProtocolConnection {
                 
                 buf
             }
-            BscCommand::SendVotes(votes) => {
+            BscCommand::Votes(votes) => {
                 let mut buf = BytesMut::new();
                 let vote_count = votes.len();
-                VotesPacket(votes).encode(&mut buf);
+                // Zero-copy encode from slice (no Vec clone). Message ID + RLP list of envelopes.
+                Self::encode_votes_slice(&mut buf, votes.as_slice());
                 
                 tracing::debug!(
                     target: "bsc_protocol",
@@ -134,6 +145,7 @@ impl BscProtocolConnection {
         let slice = frame.as_ref();
         let msg_id = slice[0];
 
+        tracing::debug!(target: "bsc_protocol", "Handshake not completed, processing handshake frame, msg_id: {:?}", msg_id);
         if msg_id != BscProtoMessageId::Capability as u8 {
             tracing::warn!(target: "bsc_protocol", got = format_args!("{:#04x}", msg_id), "Expected capability during handshake");
             return Poll::Ready(None);
@@ -167,7 +179,7 @@ impl BscProtocolConnection {
 
                 if !self.is_dialer {
                     // Responder sends capability response
-                    let response = Self::encode_command(BscCommand::SendCapability {
+                    let response = Self::encode_command(BscCommand::Capability {
                         protocol_version: BSC_PROTOCOL_VERSION,
                         extra: Bytes::from_static(&[0x00u8]) // Raw RLP: single 0x00 byte represents []byte{00}
                     });
@@ -188,10 +200,10 @@ impl BscProtocolConnection {
 
     /// Handle normal protocol messages after handshake
     fn handle_protocol_message(&self, frame: &BytesMut) {
-        tracing::debug!(target: "bsc_protocol", "Handshake completed, processing normal message");
         let slice = frame.as_ref();
         let msg_id = slice[0];
 
+        tracing::debug!(target: "bsc_protocol", "Handshake completed, processing normal message, msg_id: {:?}", msg_id);
         match msg_id {
             x if x == BscProtoMessageId::Votes as u8 => {
                 tracing::debug!(target: "bsc_protocol", "Processing votes message");
@@ -261,4 +273,3 @@ impl Stream for BscProtocolConnection {
         }
     }
 }
-
