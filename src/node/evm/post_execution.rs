@@ -117,6 +117,7 @@ where
             }
             return Err(BscBlockExecutionError::Validation(BscBlockValidationError::UnexpectedSystemTx).into());
         }
+        
         tracing::trace!("Succeed to post check new block, block_number: {}", block.number);
         Ok(())
     }

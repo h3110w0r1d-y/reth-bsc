@@ -26,7 +26,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_stream::StreamExt;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, trace};
 use reth_basic_payload_builder::{PayloadConfig, PrecachedState};
 use crate::node::miner::payload::BscBuildArguments;
 use reth_revm::cancelled::ManualCancel;
@@ -356,7 +356,7 @@ where
         
         let parent_header = match self.provider.sealed_header_by_hash(tip.hash()) {
             Ok(Some(header)) => {
-                debug!(
+                trace!(
                     target: "bsc::miner",
                     tip_number = tip.number(),
                     tip_hash = ?tip.hash(),
@@ -592,6 +592,7 @@ where
             cached_reads: mining_ctx.cached_reads.clone().unwrap_or_default(),
             config: PayloadConfig::new(Arc::new(mining_ctx.parent_header.clone()), attributes),
             cancel: ManualCancel::default(),
+            trace_id: crate::node::miner::payload::generate_trace_id(),
         };
         
         let parent_hash = mining_ctx.parent_header.hash();
@@ -620,10 +621,10 @@ where
         while let Some(result) = self.payload_job_join_set.try_join_next() {
             match result {
                 Ok(Ok(())) => {
-                    debug!("Succeed to execute payload job");
+                    trace!("Succeed to execute payload job");
                 }
                 Ok(Err(e)) => {
-                    debug!("Failed to execute payload job due to {}", e);
+                    trace!("Failed to execute payload job due to {}", e);
                 }
                 Err(join_err) => {
                     error!("Failed to execute payload job due to task panicked or was cancelled, join_err: {}", join_err);
@@ -689,17 +690,11 @@ where
         payload: BscBuiltPayload,
         delay_ms: u64,
         delay_submit_tx: mpsc::UnboundedSender<BscBuiltPayload>,
-        cancel: ManualCancel,
     ) {
         tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-            if !cancel.is_cancelled() {
-                if let Err(e) = delay_submit_tx.send(payload) {
-                    error!("Failed to send delayed payload to channel: {}", e);
-                }
-            } else {
-                debug!("Delay submit task is cancelled, block_hash: {}, block_number: {}", 
-                    payload.block().hash(), payload.block().number());
+            if let Err(e) = delay_submit_tx.send(payload) {
+                error!("Failed to send delayed payload to channel: {}", e);
             }
         });
     }
@@ -717,14 +712,34 @@ where
                             let block_number = payload.block().number();
                             let block_hash = payload.block().hash();
                             let delay_ms = self.parlia.delay_for_ramanujan_fork(&submit_ctx.mining_ctx.parent_snapshot, payload.block().header());
-                            debug!("Check submit delay, block {} (hash: 0x{:x}), delay_ms: {}", block_number, block_hash, delay_ms);
+                            debug!(
+                                target: "bsc::miner",
+                                block_number = block_number,
+                                block_hash = %block_hash,
+                                is_inturn = submit_ctx.mining_ctx.is_inturn,
+                                delay_ms = delay_ms,
+                                "Check submit delay"
+                            );
                             if delay_ms == 0 {
                                 match self.submit_payload(payload).await {
                                     Ok(()) => {
-                                        info!("Succeed to submit block {} (hash: 0x{:x})", block_number, block_hash);
+                                        info!(
+                                            target: "bsc::miner",
+                                            block_number = block_number,
+                                            block_hash = %block_hash,
+                                            is_inturn = submit_ctx.mining_ctx.is_inturn,
+                                            "Succeed to submit block"
+                                        );
                                     }
                                     Err(e) => {
-                                        error!("Failed to submit block {} (hash: 0x{:x}): {}", block_number, block_hash, e);
+                                        error!(
+                                            target: "bsc::miner",
+                                            block_number = block_number,
+                                            block_hash = %block_hash,
+                                            is_inturn = submit_ctx.mining_ctx.is_inturn,
+                                            error = %e,
+                                            "Failed to submit block"
+                                        );
                                     }
                                 }
                             } else {
@@ -735,16 +750,22 @@ where
                                     payload,
                                     delay_ms,
                                     self.delay_submit_tx.clone(),
-                                    submit_ctx.cancel.clone(),
                                 );
                                 info!(
-                                    "Block {} scheduled for delayed submission in {}ms",
-                                    block_number, delay_ms
+                                    target: "bsc::miner",
+                                    block_number = block_number,
+                                    block_hash = %block_hash,
+                                    is_inturn = submit_ctx.mining_ctx.is_inturn,
+                                    delay_ms = delay_ms,
+                                    "Block scheduled for delayed submission"
                                 );
                             }
                         }
                         None => {
-                            warn!("Main payload channel closed, stopping ResultWorkWorker");
+                            warn!(
+                                target: "bsc::miner",
+                                "Main payload channel closed, stopping ResultWorkWorker"
+                            );
                             break;
                         }
                     }
@@ -757,15 +778,29 @@ where
                             let block_hash = payload.block().hash();                            
                             match self.submit_payload(payload).await {
                                 Ok(()) => {
-                                    info!("Succeed to submit delayed block {} (hash: 0x{:x})", block_number, block_hash);
+                                    info!(
+                                        target: "bsc::miner",
+                                        block_number = block_number,
+                                        block_hash = %block_hash,
+                                        "Succeed to submit delayed block"
+                                    );
                                 }
                                 Err(e) => {
-                                    error!("Failed to submit delayed block {} (hash: 0x{:x}): {}", block_number, block_hash, e);
+                                    error!(
+                                        target: "bsc::miner",
+                                        block_number = block_number,
+                                        block_hash = %block_hash,
+                                        error = %e,
+                                        "Failed to submit delayed block"
+                                    );
                                 }
                             }
                         }
                         None => {
-                            warn!("Delay payload channel closed, stopping ResultWorkWorker");
+                            warn!(
+                                target: "bsc::miner",
+                                "Delay payload channel closed, stopping ResultWorkWorker"
+                            );
                             break;
                         }
                     }
@@ -839,6 +874,14 @@ where
             turn_status,
             "Submitting block"
         );
+
+        // Update miner metrics: best work gas used (in MGas)
+        use once_cell::sync::Lazy;
+        use crate::metrics::BscMinerMetrics;
+        static MINER_METRICS: Lazy<BscMinerMetrics> = Lazy::new(BscMinerMetrics::default);
+        
+        let gas_used_mgas = sealed_block.gas_used() as f64 / 1_000_000.0;
+        MINER_METRICS.best_work_gas_used_mgas.set(gas_used_mgas);
 
         // TODO: wait more times when huge chain import.
         // TODO: only canonical head can broadcast, avoid sidechain blocks.
