@@ -299,11 +299,12 @@ pub fn spawn_evn_refresh_listener() {
                         );
                         // Apply on-chain NodeIDs to current peers if available
                         let nodeids = crate::node::network::evn_peers::get_onchain_nodeids_set();
+                        tracing::debug!(target: "bsc::evn", nodeids = ?nodeids, "NodeIDs set");
                         let mut marked = 0usize;
                         for p in peers {
-                            let pid = p.to_string();
-                            let pid_norm = crate::node::network::evn_peers::normalize_node_id_str(&pid);
-                            if nodeids.contains(&pid_norm) {
+                            let node_id = crate::node::network::evn_peers::peer_id_to_node_id(p);
+                            tracing::debug!(target: "bsc::evn", peer_id = ?p, node_id = ?node_id, "Checking if peer is EVN: {}", nodeids.contains(&node_id));
+                            if nodeids.contains(&node_id) {
                                 crate::node::network::evn_peers::mark_evn_onchain(p);
                                 if let Some(net) = crate::shared::get_network_handle() {
                                     net.add_trusted_peer_id(p);
@@ -311,7 +312,7 @@ pub fn spawn_evn_refresh_listener() {
                                 marked += 1;
                             }
                         }
-                        tracing::info!(target: "bsc::evn", marked, "Applied on-chain EVN NodeIDs to peers");
+                        tracing::info!(target: "bsc::evn", marked = marked, nodeids = ?nodeids, "Applied on-chain EVN NodeIDs to peers");
 
                         // Start periodic refresh every 60s to apply on-chain NodeIDs to existing peers
                         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -322,11 +323,12 @@ pub fn spawn_evn_refresh_listener() {
                                 Err(_) => Vec::new(),
                             };
                             let nodeids = crate::node::network::evn_peers::get_onchain_nodeids_set();
+                            tracing::debug!(target: "bsc::evn", nodeids = ?nodeids, "NodeIDs set");
                             let mut marked = 0usize;
                             for p in peers {
-                                let pid = p.to_string();
-                                let pid_norm = crate::node::network::evn_peers::normalize_node_id_str(&pid);
-                                if nodeids.contains(&pid_norm) {
+                                let node_id = crate::node::network::evn_peers::peer_id_to_node_id(p);
+                                tracing::debug!(target: "bsc::evn", peer_id = ?p, node_id = ?node_id, "Checking if peer is EVN: {}", nodeids.contains(&node_id));
+                                if nodeids.contains(&node_id) {
                                     crate::node::network::evn_peers::mark_evn_onchain(p);
                                     if let Some(net) = crate::shared::get_network_handle() {
                                         net.add_trusted_peer_id(p);
@@ -334,7 +336,7 @@ pub fn spawn_evn_refresh_listener() {
                                     marked += 1;
                                 }
                             }
-                            tracing::debug!(target: "bsc::evn", marked, "Periodic EVN on-chain NodeIDs applied to peers");
+                            tracing::debug!(target: "bsc::evn", marked = marked, nodeids = ?nodeids, "Periodic EVN on-chain NodeIDs applied to peers");
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
